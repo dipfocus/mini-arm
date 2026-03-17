@@ -192,10 +192,10 @@ Please note your Robotic Arm brand and model. 下单/咨询请注明使用的机
 - **Yanhan Sun** - Feetech Version Design
 - **Zhaoye Zhou** - Hareware Assemble and Adjustment
 - **Chenyang Shi** - SAPIEN and website setup
+- **Nuobei Zhu** - Hardware and Production Optimization 
 - **Zewei Ye** - LeRobot adaptation and real-world Experiment
 - **Jiaqi Lu** - Real-world Experiment
 - **Jie Yi** - Real-world Experiment
-- **Nuobei Zhu** - Hardware and Production Optimization 
 - **Siyuan Wang, Lixing Zou** - Hardware Assemble
 - **Junda Huang** - Idea Discussion and website setup
 - **Gaotian Wang** - Idea Discussion
