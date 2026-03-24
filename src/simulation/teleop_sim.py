@@ -16,8 +16,11 @@ class ServoTeleoperatorSim:
     """Robot arm teleoperation simulation system
     
     Supports reading servo angles through serial port and mapping to different types of robot arm simulation environments.
-    Supported robot arm types: arx-x5, so100, xarm6_robotiq, panda, x_fetch, unitree_h1
+    Supported robot arm types: arx-x5, so100, xarm6_robotiq, panda, x_fetch,
+    piper, widowx250s, unitree_h1
     """
+    NUM_SERVOS = 8
+    START_SERVO_ID = 1
     
     def __init__(self, scene: str, robot_uids: str, serial_port: str = '/dev/ttyUSB0'):
         """Initialize teleoperation system
@@ -36,8 +39,8 @@ class ServoTeleoperatorSim:
         self.scene = scene
         self.robot_uids = robot_uids
         self.gripper_range = 0.48
-        self.zero_angles = [0.0] * 7  # Initial calibration angles for servos
-        self.sim_init_angles = [0.0] * 7  # Simulation initial angles
+        self.zero_angles = [0.0] * self.NUM_SERVOS  # Initial calibration angles for servos
+        self.sim_init_angles = [0.0] * self.NUM_SERVOS  # Simulation initial angles
         self.stop_event = Event()
         self.rate = 50.0  # Control frequency
         
@@ -141,13 +144,16 @@ class ServoTeleoperatorSim:
     def _init_servos(self):
         """Initialize servos and calibrate zero position angles"""
         self.send_command('#000PVER!')
-        for i in range(7):
+        for i, servo_id in enumerate(self._servo_ids()):
             self.send_command("#000PCSK!")
-            self.send_command(f'#{i:03d}PULK!')
-            response = self.send_command(f'#{i:03d}PRAD!')
+            self.send_command(f'#{servo_id:03d}PULK!')
+            response = self.send_command(f'#{servo_id:03d}PRAD!')
             angle = self.pwm_to_angle(response.strip())
             self.zero_angles[i] = angle if angle is not None else 0.0
         print("[INFO] Servo initial angle calibration completed")
+
+    def _servo_ids(self):
+        return range(self.START_SERVO_ID, self.START_SERVO_ID + self.NUM_SERVOS)
 
     def send_command(self, cmd: str) -> str:
         """Send serial command and read response
@@ -229,19 +235,40 @@ class ServoTeleoperatorSim:
         position = pos_min + (pos_max - pos_min) * ratio
         return float(np.clip(position, pos_min, pos_max))
 
+    def _split_pose(self, pose: list):
+        pose_arr = np.asarray(pose, dtype=np.float32)
+        if pose_arr.ndim != 1:
+            raise ValueError(f"Expected a 1D pose vector, but got shape {pose_arr.shape}")
+        if pose_arr.size != self.NUM_SERVOS:
+            raise ValueError(
+                f"Expected {self.NUM_SERVOS} servo values (7 arm joints + 1 gripper), "
+                f"but got {pose_arr.size}"
+            )
+        arm_pose = pose_arr[:-1].copy()
+        gripper = float(pose_arr[-1])
+        return arm_pose, gripper
+
+    def _select_arm_joints(self, arm_pose: np.ndarray, dof: int, robot_name: str) -> np.ndarray:
+        if arm_pose.size < dof:
+            raise ValueError(
+                f"{robot_name} needs {dof} arm joints, but only received {arm_pose.size}"
+            )
+        return arm_pose[:dof].copy()
+
     def convert_pose_to_action(self, pose: list) -> np.ndarray: 
         """Convert servo position to simulation action based on different robot arm types
         
         Args:
-            pose: 7-dimensional servo angle list (radians)
+            pose: Servo angle list (radians), typically 7 arm joints + 1 gripper
             
         Returns:
             Corresponding robot arm action vector
         """
         action = np.array([])
+        arm_pose, gripper = self._split_pose(pose)
 
         if self.robot_uids == "arx-x5":  # 6-axis robot arm + dual-finger gripper
-            action = np.array(pose)
+            action = np.concatenate([self._select_arm_joints(arm_pose, 6, "arx-x5"), [gripper]])
             # Handle gripper: map last dimension to gripper position
             action[-1] = self.angle_to_gripper(action[-1], 0, 0.044)
             action = np.concatenate([action, [action[-1]]])
@@ -250,16 +277,14 @@ class ServoTeleoperatorSim:
             action[4], action[5] = -action[5], -action[4]  # Swap joints 4 and 5
         
         elif self.robot_uids == "piper":  # 6-axis robot arm + dual-finger gripper
-            action = np.array(pose)
+            action = np.concatenate([self._select_arm_joints(arm_pose, 6, "piper"), [gripper]])
             action[-1] = self.angle_to_gripper(action[-1], 0, 0.04)
 
             action = np.concatenate([action, [action[-1]]])
             action[3], action[4] = action[4], -action[3]  # Swap joints 4 and 5
 
         elif self.robot_uids == "so100":  # 5-axis robot arm
-            pose_copy = pose.copy()
-            pose_copy.pop(5)  # Remove 6th dimension (so100 only has 5 axes)
-            action = np.array(pose_copy)
+            action = np.concatenate([self._select_arm_joints(arm_pose, 5, "so100"), [gripper]])
             action[-1] = self.angle_to_gripper(action[-1], -1.1, 1.1)
             
             action[0] = -action[0]
@@ -267,24 +292,19 @@ class ServoTeleoperatorSim:
             action[4] = -action[4]
 
         elif self.robot_uids == "xarm6_robotiq":  # 6-axis robot arm + Robotiq gripper
-            action = np.array(pose)
+            action = np.concatenate([self._select_arm_joints(arm_pose, 6, "xarm6_robotiq"), [gripper]])
             action[3], action[4] = action[4], -action[3]  # Swap joints 3 and 4
             # action[1] = -action[1]
             action[-1] = 0.81 - self.angle_to_gripper(action[-1], 0, 0.81)
 
         elif self.robot_uids == "panda":  # 7-axis robot arm
-            pose_copy = pose.copy()
-            pose_copy.insert(2, 0.0)  # Insert 0 at 3rd position (Panda's 3rd joint)
-            action = np.array(pose_copy)
-            # action[1] = -action[1]
+            action = np.concatenate([self._select_arm_joints(arm_pose, 7, "panda"), [gripper]])
             action[3] = -action[3]
             action[4], action[5] = action[5], action[4]  # Swap joints 4 and 5
             action[-1] = self.angle_to_gripper(action[-1], -1.0, 1.0)
 
         elif self.robot_uids == "x_fetch":  # Dual-arm robot + mobile base
-            pose_copy = pose.copy()
-            pose_copy.pop(5)  # Remove 6th dimension
-            action = np.array(pose_copy)
+            action = np.concatenate([self._select_arm_joints(arm_pose, 5, "x_fetch"), [gripper]])
             action[-1] = self.angle_to_gripper(action[-1], -1.1, 1.1)
             # Adjust joint directions
             action[0] = -action[0]
@@ -306,13 +326,13 @@ class ServoTeleoperatorSim:
             ])
 
         elif self.robot_uids == "widowx250s":  # 6-axis robot arm + dual-finger gripper
-            action = np.array(pose)
+            action = np.concatenate([self._select_arm_joints(arm_pose, 6, "widowx250s"), [gripper]])
             action[-1] = self.angle_to_gripper(action[-1], 0, 0.04)
             action = np.concatenate([action, [action[-1]]])
             action[3], action[4] = action[4], -action[3] 
         
         elif self.robot_uids == "unitree_h1":  # Humanoid robot
-            raw = np.array(pose, dtype=np.float32)
+            raw = self._select_arm_joints(arm_pose, 7, "unitree_h1").astype(np.float32)
             action = np.zeros(19, dtype=np.float32)
 
             # Only modify arm joint increments (relative to current state)
@@ -358,7 +378,7 @@ class ServoTeleoperatorSim:
         Args:
             on_send: Callback function that receives angle data list
         """
-        num_joints = 7
+        num_joints = self.NUM_SERVOS
         arm_pos = [0.0] * num_joints
 
         period = max(1.0 / self.rate, 1e-6)
@@ -366,15 +386,15 @@ class ServoTeleoperatorSim:
 
         while not self.stop_event.is_set():
             # Read all joint angles
-            for i in range(num_joints):
-                response = self.send_command(f'#{i:03d}PRAD!')
+            for i, servo_id in enumerate(self._servo_ids()):
+                response = self.send_command(f'#{servo_id:03d}PRAD!')
                 angle = self.pwm_to_angle(response.strip())
                 if angle is not None:
                     # Calculate angle relative to zero position
                     new_angle = angle - self.zero_angles[i]
                     arm_pos[i] = np.radians(new_angle)
                 else: 
-                    raise ValueError(f"Servo {i} response error: {response.strip()}")
+                    raise ValueError(f"Servo {servo_id} response error: {response.strip()}")
             
             # Publish latest data and call callback
             self.publish_arm_pos(arm_pos)
@@ -457,7 +477,7 @@ if __name__ == "__main__":
         '--robot', '-r', 
         type=str, 
         default='so100',
-        choices=['arx-x5', 'so100', 'xarm6_robotiq', 'panda', 'x_fetch', 'piper', 'widowx250s'],
+        choices=['arx-x5', 'so100', 'xarm6_robotiq', 'panda', 'x_fetch', 'piper', 'widowx250s', 'unitree_h1'],
         help='Select robot arm type to control'
     )
     parser.add_argument(
@@ -478,7 +498,6 @@ if __name__ == "__main__":
         default='/dev/ttyUSB0',
         help='Serial port device path'
     )
-    
     args = parser.parse_args()
     
     # Display startup information
@@ -493,7 +512,11 @@ if __name__ == "__main__":
     
     # Create and run simulation instance
     try:
-        sim = ServoTeleoperatorSim(scene=args.scene, robot_uids=args.robot, serial_port=args.serial_port)
+        sim = ServoTeleoperatorSim(
+            scene=args.scene,
+            robot_uids=args.robot,
+            serial_port=args.serial_port,
+        )
         sim.rate = args.rate
         sim.run()
     except Exception as e:
