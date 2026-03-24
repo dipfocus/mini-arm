@@ -299,8 +299,6 @@ class ServoTeleoperatorSim:
 
         elif self.robot_uids == "panda":  # 7-axis robot arm
             action = np.concatenate([self._select_arm_joints(arm_pose, 7, "panda"), [gripper]])
-            action[3] = -action[3]
-            action[4], action[5] = action[5], action[4]  # Swap joints 4 and 5
             action[-1] = self.angle_to_gripper(action[-1], -1.0, 1.0)
 
         elif self.robot_uids == "x_fetch":  # Dual-arm robot + mobile base
