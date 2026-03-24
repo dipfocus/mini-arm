@@ -3,7 +3,10 @@ import time
 import numpy as np
 import re
 
-init_qpos = np.array([14.1, -8, -24.7, 196.9, 62.3, -8.8, 0.0])
+NUM_SERVOS = 8
+START_SERVO_ID = 1
+
+init_qpos = np.array([14.1, -8, -24.7, 196.9, 62.3, -8.8, 0.0, 0.0])
 init_qpos = np.radians(init_qpos)
 
 
@@ -45,31 +48,31 @@ def angle_to_gripper(angle_deg, angle_range=270, pos_min=50, pos_max=730):
     return int(np.clip(position, pos_min, pos_max))
 
 def main():
-    index=2
-    arm_pos = [0.0] * 7
-    angle_pos = [0.0] * 7
-    zero_angles = [0.0] * 7
+    arm_pos = [0.0] * NUM_SERVOS
+    angle_pos = [0.0] * NUM_SERVOS
+    zero_angles = [0.0] * NUM_SERVOS
     with serial.Serial(SERIAL_PORT, BAUDRATE, timeout=0.01) as ser:
         print("Serial port opened")
 
-        response = send_command(ser, f'#00{index}PVER!')
+        version_response = send_command(ser, '#000PVER!')
         
-        for i in range(7):
-            cmd = f'#00{i}PULK!'
+        for servo_id in range(START_SERVO_ID, START_SERVO_ID + NUM_SERVOS):
+            cmd = f'#{servo_id:03d}PULK!'
             response = send_command(ser, cmd)
-            print(f"Servo {i} torque released: {response.strip()}")
+            print(f"Servo {servo_id} torque released: {response.strip()}")
 
-        print(f"Version response: {response.strip()}")
+        print(f"Version response: {version_response.strip()}")
         while True:
-            for i in range(7):
-                cmd = f'#00{i}PRAD!'
+            for servo_id in range(START_SERVO_ID, START_SERVO_ID + NUM_SERVOS):
+                index = servo_id - START_SERVO_ID
+                cmd = f'#{servo_id:03d}PRAD!'
                 response = send_command(ser, cmd)
                 angle = pwm_to_angle(response.strip())
-                angle_pos[i] = angle
+                angle_pos[index] = angle
                 if angle is not None:
-                    angle_offset = angle - zero_angles[i]+init_qpos[i]
+                    angle_offset = angle - zero_angles[index] + init_qpos[index]
                     angle_rad = np.radians(angle_offset)
-                    arm_pos[i] = angle_rad
+                    arm_pos[index] = angle_rad
             print(angle_pos)
     
 if __name__ == "__main__":
