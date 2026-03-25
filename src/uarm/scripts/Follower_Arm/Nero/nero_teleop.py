@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 from pathlib import Path
+import logging
 import threading
 import time
 import numpy as np
@@ -12,15 +13,23 @@ if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
 from uarm.scripts.Follower_Arm.Nero.arm_controller import ArmController
+from uarm.scripts.Follower_Arm.Nero.log_utils import configure_logging
 from uarm.scripts.Follower_Arm.Nero.servo_reader import ServoReader
 
 
+logger = logging.getLogger(__name__)
+
+
 class NeroTeleop:
-    def __init__(self, interface="can0", control_hz=100.0, connect_speed_percent=5):
+    NERO_DOF = 7
+    MASTER_SERVO_COUNT = 8
+    GRIPPER_INDEX = NERO_DOF
+
+    def __init__(self, channel="can0", control_hz=100.0, connect_speed_percent=5):
         if control_hz <= 0.0:
             raise ValueError(f"control_hz must be greater than 0, got {control_hz}")
 
-        self.ctrl = ArmController(channel=interface)
+        self.ctrl = ArmController(channel=channel)
         self.ctrl.connect(speed_percent=connect_speed_percent)
         self.ctrl.set_motion_mode("j")
         self.ctrl.move_to_home(blocking=True)
@@ -29,11 +38,13 @@ class NeroTeleop:
         if current_joints is None:
             raise RuntimeError("Failed to read joint angles after connecting to the Nero arm")
 
-        self.dof = len(current_joints)
+        if len(current_joints) != self.NERO_DOF:
+            raise RuntimeError(
+                f"NeroTeleop expects {self.NERO_DOF} follower-arm joints, got {len(current_joints)}"
+            )
         self.control_dt = 1.0 / float(control_hz)
 
         # Master arm layout: 7 joint servos + 1 gripper servo.
-        self.gripper_index = self.dof
         self.gripper_min_deg = -10.0
         self.gripper_max_deg = 30.0
         self.gripper_min_width = 0.0
@@ -41,15 +52,13 @@ class NeroTeleop:
         self.gripper_force = 1.0
 
         # Servo IDs 1-7 drive the 7 arm joints, and servo ID 8 drives the gripper.
-        self.master_joint_count = min(self.gripper_index, self.dof)
-        self.scale = np.ones(self.master_joint_count, dtype=np.float64)
-        self.offset_rad = np.zeros(self.master_joint_count, dtype=np.float64)
+        self.scale = np.ones(self.NERO_DOF, dtype=np.float64)
+        self.offset_rad = np.zeros(self.NERO_DOF, dtype=np.float64)
 
         # === Velocity limiting parameters (can be adjusted per joint) ===
         # Maximum joint velocity (rad/s), default uniform upper limit (about 69 deg/s)
-        self.max_joint_vel = np.array([1.2] * self.dof, dtype=np.float64)
-        if self.dof > 3:
-            self.max_joint_vel[3:] = 2.0
+        self.max_joint_vel = np.array([1.2] * self.NERO_DOF, dtype=np.float64)
+        self.max_joint_vel[3:] = 2.0
         # Maximum gripper "normalized velocity" (/s), maximum change per second in 0~1 range
         self.max_gripper_vel = 2.0
 
@@ -57,22 +66,26 @@ class NeroTeleop:
         self._last_cmd_pos = np.array(current_joints, dtype=np.float64)
         self._last_cmd_grip = 0.0
 
+    def _validate_master_angles(self, master_angles_deg):
+        actual_count = len(master_angles_deg)
+        if actual_count != self.MASTER_SERVO_COUNT:
+            raise ValueError(
+                "Expected 8 master servo angles (7 joints + 1 gripper), "
+                f"got {actual_count}"
+            )
+
     def _deg_to_rad_mapped(self, master_angles_deg):
         """Master arm angle (degrees) -> Slave arm joint angle (radians)"""
+        self._validate_master_angles(master_angles_deg)
         joints_rad = self._last_cmd_pos.copy()
-        mapped_joint_count = min(len(master_angles_deg), self.master_joint_count)
-        for j in range(mapped_joint_count):
+        for j in range(self.NERO_DOF):
             joints_rad[j] = np.deg2rad(master_angles_deg[j]) * self.scale[j] + self.offset_rad[j]
-
-        if mapped_joint_count >= 6 and self.dof >= 6:
-            joints_rad[4], joints_rad[5] = -joints_rad[5], joints_rad[4]
 
         return joints_rad
 
     def _map_gripper(self, master_angles_deg):
-        if len(master_angles_deg) <= self.gripper_index:
-            return self._last_cmd_grip
-        grip_deg = master_angles_deg[self.gripper_index]
+        self._validate_master_angles(master_angles_deg)
+        grip_deg = master_angles_deg[self.GRIPPER_INDEX]
         grip_norm = (grip_deg - self.gripper_min_deg) / max(1e-6, self.gripper_max_deg - self.gripper_min_deg)
         return float(np.clip(grip_norm, 0.0, 1.0))
 
@@ -118,24 +131,25 @@ class NeroTeleop:
 
 
 if __name__ == "__main__":
+    configure_logging()
     teleop = None
     try:
         # Create master arm reader
         servo_reader = ServoReader(
             port="/dev/ttyUSB0",
             baudrate=115200,
-            servo_count=8,
+            servo_count=NeroTeleop.MASTER_SERVO_COUNT,
             first_servo_id=1,
         )
 
         # Create slave arm controller (with velocity limiting)
-        teleop = NeroTeleop(interface="can0", control_hz=100.0)
+        teleop = NeroTeleop(channel="can0", control_hz=100.0)
 
         # Start reading thread
         t_reader = threading.Thread(target=servo_reader.read_loop, kwargs={"hz": 100}, daemon=True)
         t_reader.start()
 
-        print("[Main] Teleoperation started, press Ctrl+C to exit.")
+        logger.info("Teleoperation started, press Ctrl+C to exit.")
         dt = teleop.control_dt
         while True:
             master_angles = servo_reader.get_angles()
@@ -143,8 +157,8 @@ if __name__ == "__main__":
             time.sleep(dt)
 
     except KeyboardInterrupt:
-        print("\n[Main] Interrupted, robot arm returning to home...")
+        logger.info("Interrupted, robot arm returning to home...")
     finally:
         if teleop is not None:
             teleop.shutdown()
-        print("[Main] Exited.")
+        logger.info("Exited.")

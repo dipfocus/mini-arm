@@ -1,9 +1,21 @@
 import argparse
+import logging
 import re
+import sys
 import threading
 import time
+from pathlib import Path
 
 import serial
+
+SRC_DIR = Path(__file__).resolve().parents[4]
+if str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
+
+from uarm.scripts.Follower_Arm.Nero.log_utils import configure_logging
+
+
+logger = logging.getLogger(__name__)
 
 
 class ServoReader:
@@ -19,7 +31,7 @@ class ServoReader:
                 f"first_servo_id must be greater than 0, got {self.first_servo_id}"
             )
         self.ser = serial.Serial(self.SERIAL_PORT, self.BAUDRATE, timeout=0.1)
-        print(f"[ServoReader] Serial port {self.SERIAL_PORT} opened")
+        logger.info("Serial port %s opened", self.SERIAL_PORT)
 
         self.zero_angles = [0.0] * self.servo_count
         self.current_angles = [0.0] * self.servo_count
@@ -50,7 +62,7 @@ class ServoReader:
             response = self.send_command(f'#{servo_id:03d}PRAD!')
             angle = self.pwm_to_angle(response.strip())
             self.zero_angles[index] = angle if angle is not None else 0.0
-        print("[ServoReader] Servo initial angle calibration completed")
+        logger.info("Servo initial angle calibration completed")
 
     def read_loop(self, hz=100):
         if hz <= 0:
@@ -78,7 +90,7 @@ class ServoReader:
         self.stop()
         if self.ser.is_open:
             self.ser.close()
-            print(f"[ServoReader] Serial port {self.SERIAL_PORT} closed")
+            logger.info("Serial port %s closed", self.SERIAL_PORT)
 
 
 def main():
@@ -116,6 +128,8 @@ def main():
     if args.print_hz <= 0:
         parser.error("--print-hz must be greater than 0")
 
+    configure_logging()
+
     reader = None
     reader_thread = None
     try:
@@ -132,15 +146,15 @@ def main():
         )
         reader_thread.start()
 
-        print("[ServoReader] Test started, press Ctrl+C to stop.")
+        logger.info("Test started, press Ctrl+C to stop.")
         dt = 1.0 / args.print_hz
         while True:
-            print(f"[ServoReader] Current angles: {reader.get_angles()}")
+            logger.info("Current angles: %s", reader.get_angles())
             time.sleep(dt)
     except KeyboardInterrupt:
-        print("\n[ServoReader] Test interrupted")
+        logger.info("Test interrupted")
     except serial.SerialException as exc:
-        print(f"[ServoReader] Serial communication failed: {exc}")
+        logger.error("Serial communication failed: %s", exc)
         return 1
     finally:
         if reader is not None:
