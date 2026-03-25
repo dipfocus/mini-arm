@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import argparse
 from pathlib import Path
 import logging
 import threading
@@ -24,14 +25,34 @@ class NeroTeleop:
     NERO_DOF = 7
     MASTER_SERVO_COUNT = 8
     GRIPPER_INDEX = NERO_DOF
+    DEFAULT_BASE_JOINT_MAX_VEL = 1.2
+    DEFAULT_WRIST_JOINT_MAX_VEL = 2.0
+    DEFAULT_GRIPPER_MAX_VEL = 2.0
 
-    def __init__(self, channel="can0", control_hz=100.0, connect_speed_percent=5):
+    def __init__(
+        self,
+        channel="can0",
+        control_hz=100.0,
+        connect_speed_percent=5,
+        base_joint_max_vel=DEFAULT_BASE_JOINT_MAX_VEL,
+        wrist_joint_max_vel=DEFAULT_WRIST_JOINT_MAX_VEL,
+        gripper_max_vel=DEFAULT_GRIPPER_MAX_VEL,
+    ):
         if control_hz <= 0.0:
             raise ValueError(f"control_hz must be greater than 0, got {control_hz}")
+        if base_joint_max_vel <= 0.0:
+            raise ValueError(
+                f"base_joint_max_vel must be greater than 0, got {base_joint_max_vel}"
+            )
+        if wrist_joint_max_vel <= 0.0:
+            raise ValueError(
+                f"wrist_joint_max_vel must be greater than 0, got {wrist_joint_max_vel}"
+            )
+        if gripper_max_vel <= 0.0:
+            raise ValueError(f"gripper_max_vel must be greater than 0, got {gripper_max_vel}")
 
         self.ctrl = ArmController(channel=channel)
         self.ctrl.connect(speed_percent=connect_speed_percent)
-        self.ctrl.set_motion_mode("j")
         self.ctrl.move_to_home(blocking=True)
 
         current_joints = self.ctrl.get_joint_angles()
@@ -51,16 +72,12 @@ class NeroTeleop:
         self.gripper_max_width = 0.1
         self.gripper_force = 1.0
 
-        # Servo IDs 1-7 drive the 7 arm joints, and servo ID 8 drives the gripper.
-        self.scale = np.ones(self.NERO_DOF, dtype=np.float64)
-        self.offset_rad = np.zeros(self.NERO_DOF, dtype=np.float64)
-
         # === Velocity limiting parameters (can be adjusted per joint) ===
-        # Maximum joint velocity (rad/s), default uniform upper limit (about 69 deg/s)
-        self.max_joint_vel = np.array([1.2] * self.NERO_DOF, dtype=np.float64)
-        self.max_joint_vel[3:] = 2.0
+        # Use a lower limit on the larger base joints and a higher limit on the wrist joints.
+        self.max_joint_vel = np.full(self.NERO_DOF, base_joint_max_vel, dtype=np.float64)
+        self.max_joint_vel[3:] = wrist_joint_max_vel
         # Maximum gripper "normalized velocity" (/s), maximum change per second in 0~1 range
-        self.max_gripper_vel = 2.0
+        self.max_gripper_vel = float(gripper_max_vel)
 
         # Velocity limiting state (target sent in previous cycle)
         self._last_cmd_pos = np.array(current_joints, dtype=np.float64)
@@ -77,11 +94,7 @@ class NeroTeleop:
     def _deg_to_rad_mapped(self, master_angles_deg):
         """Master arm angle (degrees) -> Slave arm joint angle (radians)"""
         self._validate_master_angles(master_angles_deg)
-        joints_rad = self._last_cmd_pos.copy()
-        for j in range(self.NERO_DOF):
-            joints_rad[j] = np.deg2rad(master_angles_deg[j]) * self.scale[j] + self.offset_rad[j]
-
-        return joints_rad
+        return np.deg2rad(master_angles_deg[:self.NERO_DOF]).astype(np.float64, copy=False)
 
     def _map_gripper(self, master_angles_deg):
         self._validate_master_angles(master_angles_deg)
@@ -107,9 +120,11 @@ class NeroTeleop:
 
         # === Joint velocity limiting: limit maximum step per cycle ===
         max_step = self.max_joint_vel * dt
-        delta = desired_pos - self._last_cmd_pos
-        delta_clipped = np.clip(delta, -max_step, max_step)
-        cmd_pos = self._last_cmd_pos + delta_clipped
+        cmd_pos = self._last_cmd_pos + np.clip(
+            desired_pos - self._last_cmd_pos,
+            -max_step,
+            max_step,
+        )
 
         # === Gripper velocity limiting ===
         grip_delta = desired_grip - self._last_cmd_grip
@@ -130,26 +145,86 @@ class NeroTeleop:
             self.ctrl.disconnect()
 
 
+def _parse_args():
+    parser = argparse.ArgumentParser(description="Teleoperate the Nero follower arm.")
+    parser.add_argument("--channel", default="can0", help="CAN channel for the Nero arm")
+    parser.add_argument(
+        "--control-hz",
+        type=float,
+        default=100.0,
+        help="Teleoperation loop frequency in Hz",
+    )
+    parser.add_argument(
+        "--connect-speed-percent",
+        type=int,
+        default=5,
+        help="Initial vendor speed percent used during connect and homing",
+    )
+    parser.add_argument(
+        "--base-joint-max-vel",
+        type=float,
+        default=NeroTeleop.DEFAULT_BASE_JOINT_MAX_VEL,
+        help="Velocity limit for joints 1-3 in rad/s",
+    )
+    parser.add_argument(
+        "--wrist-joint-max-vel",
+        type=float,
+        default=NeroTeleop.DEFAULT_WRIST_JOINT_MAX_VEL,
+        help="Velocity limit for joints 4-7 in rad/s",
+    )
+    parser.add_argument(
+        "--gripper-max-vel",
+        type=float,
+        default=NeroTeleop.DEFAULT_GRIPPER_MAX_VEL,
+        help='Velocity limit for gripper normalized command in 1/s',
+    )
+    parser.add_argument("--port", default="/dev/ttyUSB0", help="Serial port for the master arm")
+    parser.add_argument(
+        "--baudrate",
+        type=int,
+        default=115200,
+        help="Baudrate for the master arm serial connection",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
     configure_logging()
     teleop = None
+    args = _parse_args()
     try:
         # Create master arm reader
         servo_reader = ServoReader(
-            port="/dev/ttyUSB0",
-            baudrate=115200,
+            port=args.port,
+            baudrate=args.baudrate,
             servo_count=NeroTeleop.MASTER_SERVO_COUNT,
             first_servo_id=1,
         )
 
         # Create slave arm controller (with velocity limiting)
-        teleop = NeroTeleop(channel="can0", control_hz=100.0)
+        teleop = NeroTeleop(
+            channel=args.channel,
+            control_hz=args.control_hz,
+            connect_speed_percent=args.connect_speed_percent,
+            base_joint_max_vel=args.base_joint_max_vel,
+            wrist_joint_max_vel=args.wrist_joint_max_vel,
+            gripper_max_vel=args.gripper_max_vel,
+        )
 
         # Start reading thread
-        t_reader = threading.Thread(target=servo_reader.read_loop, kwargs={"hz": 100}, daemon=True)
+        t_reader = threading.Thread(
+            target=servo_reader.read_loop,
+            kwargs={"hz": args.control_hz},
+            daemon=True,
+        )
         t_reader.start()
 
-        logger.info("Teleoperation started, press Ctrl+C to exit.")
+        logger.info(
+            "Teleoperation started on %s at %.1f Hz with joint limits %s rad/s, press Ctrl+C to exit.",
+            args.channel,
+            args.control_hz,
+            teleop.max_joint_vel.tolist(),
+        )
         dt = teleop.control_dt
         while True:
             master_angles = servo_reader.get_angles()
