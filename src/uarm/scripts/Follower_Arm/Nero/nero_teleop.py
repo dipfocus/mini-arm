@@ -131,7 +131,7 @@ class NeroTeleop:
         grip_step = self.max_gripper_vel * dt
         grip_cmd = self._last_cmd_grip + float(np.clip(grip_delta, -grip_step, grip_step))
         # Send command
-        self.ctrl.move_j(cmd_pos.tolist(), blocking=False)
+        self.ctrl.move_js(cmd_pos.tolist(), blocking=False)
         self.ctrl.move_gripper(self._gripper_norm_to_width(grip_cmd), force=self.gripper_force)
 
         # Update state

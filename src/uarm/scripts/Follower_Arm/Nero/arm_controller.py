@@ -249,6 +249,22 @@ class ArmController:
             return self._wait_motion_done(timeout=timeout)
         return True
 
+    def move_js(self, joints: List[float], blocking: bool = False, timeout: float = 5.0) -> bool:
+        """
+        Send a fast-response joint command using the vendor JS slave-arm mode.
+
+        :param joints: [j1, j2, j3, j4, j5, j6, j7] (radians)
+        :param blocking: If True, wait until motion is complete.
+        :param timeout: Max wait time in seconds if blocking is True.
+        :return: True if command sent.
+        """
+        assert self.is_connected(), "Robot is not connected"
+
+        self.robot.move_js(joints)
+        if blocking:
+            return self._wait_motion_done(timeout=timeout)
+        return True
+
     def move_to_home(self, blocking: bool = True) -> bool:
         """
         Move the robot to a safe 'home' position using joint interpolation.
