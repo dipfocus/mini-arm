@@ -64,6 +64,8 @@ class NeroTeleop:
                 f"NeroTeleop expects {self.NERO_DOF} follower-arm joints, got {len(current_joints)}"
             )
         self.control_dt = 1.0 / float(control_hz)
+        # Treat the startup home pose as the teleoperation zero target.
+        self.home_joints = np.array(current_joints, dtype=np.float64)
 
         # Master arm layout: 7 joint servos + 1 gripper servo.
         self.gripper_min_deg = -10.0
@@ -80,8 +82,12 @@ class NeroTeleop:
         self.max_gripper_vel = float(gripper_max_vel)
 
         # Velocity limiting state (target sent in previous cycle)
-        self._last_cmd_pos = np.array(current_joints, dtype=np.float64)
+        self._last_cmd_pos = self.home_joints.copy()
         self._last_cmd_grip = 0.0
+        logger.info(
+            "Teleop zero aligned: master startup zero maps to follower joints %s",
+            self.home_joints.tolist(),
+        )
 
     def _validate_master_angles(self, master_angles_deg):
         actual_count = len(master_angles_deg)
@@ -92,9 +98,13 @@ class NeroTeleop:
             )
 
     def _deg_to_rad_mapped(self, master_angles_deg):
-        """Master arm angle (degrees) -> Slave arm joint angle (radians)"""
+        """Master relative angle (degrees) -> follower home-referenced joint angle (radians)."""
         self._validate_master_angles(master_angles_deg)
-        return np.deg2rad(master_angles_deg[:self.NERO_DOF]).astype(np.float64, copy=False)
+        relative_joints = np.deg2rad(master_angles_deg[:self.NERO_DOF]).astype(
+            np.float64,
+            copy=False,
+        )
+        return self.home_joints + relative_joints
 
     def _map_gripper(self, master_angles_deg):
         self._validate_master_angles(master_angles_deg)
