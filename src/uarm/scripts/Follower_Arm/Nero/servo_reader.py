@@ -77,6 +77,7 @@ class ServoReader:
                     new_angles[index] = angle - self.zero_angles[index]
             with self.lock:
                 self.current_angles = new_angles
+            logger.debug("Servo read completed: angles=%s", new_angles)
             self._stop_event.wait(dt)
 
     def get_angles(self):
