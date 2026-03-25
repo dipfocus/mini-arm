@@ -15,6 +15,15 @@ logger = logging.getLogger(__name__)
 
 class ArmController:
     DEFAULT_ROBOT_TYPE = "nero"
+    HOME_JOINTS = (
+        -0.000925,
+        1.665288,
+        0.000087,
+        0.001798,
+        0.000122,
+        0.000000,
+        0.000140,
+    )
     _POLL_INTERVAL = 0.1
 
     def __init__(self, channel: str = "can0", *, robot_type: str = DEFAULT_ROBOT_TYPE):
@@ -248,16 +257,8 @@ class ArmController:
             raise NotImplementedError(
                 f"move_to_home() is not defined for robot_type={self.robot_type!r}"
             )
-        scale = 57324.840764
-        home_joints = [-88000 / scale, 
-                       -97000 / scale, 
-                       2719 / scale, 
-                       118000 / scale,
-                       6882 / scale,
-                       -9 / scale, 
-                       73000 / scale]
-        logger.info("Moving to home position: %s", home_joints)
-        return self.move_j(home_joints, blocking=blocking)
+        logger.info("Moving to home position: %s", self.HOME_JOINTS)
+        return self.move_j(list(self.HOME_JOINTS), blocking=blocking)
 
     def move_p(self, pose: List[float], blocking: bool = False, timeout: float = 5.0) -> bool:
         """

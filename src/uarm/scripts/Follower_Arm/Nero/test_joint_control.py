@@ -15,6 +15,8 @@ if str(SRC_DIR) not in sys.path:
 if TYPE_CHECKING:
     from uarm.scripts.Follower_Arm.Nero.arm_controller import ArmController
 
+from uarm.scripts.Follower_Arm.Nero.log_utils import configure_logging
+
 
 def ease_in_out_quad(t: float) -> float:
     t *= 2.0
@@ -81,6 +83,8 @@ def main(
     gripper_width: float,
 ) -> None:
     from uarm.scripts.Follower_Arm.Nero.arm_controller import ArmController
+
+    configure_logging()
 
     if steps < 2:
         raise click.BadParameter("steps must be at least 2", param_hint="steps")
