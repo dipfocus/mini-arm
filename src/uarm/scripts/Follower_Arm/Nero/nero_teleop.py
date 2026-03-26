@@ -34,7 +34,7 @@ class NeroTeleop:
         1.0,
         1.0,
         1.0,
-        1.0,
+        -1.0,
     )
 
     def __init__(
