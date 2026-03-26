@@ -74,8 +74,9 @@ class ServoReader:
             response += self.ser.read(self.ser.in_waiting)
         return response
 
-    def send_command(self, cmd):
-        self._clear_input_buffer()
+    def send_command(self, cmd, *, clear_input=False):
+        if clear_input:
+            self._clear_input_buffer()
         self.ser.write(cmd.encode('ascii'))
         self.ser.flush()
         return self._read_response().decode('ascii', errors='ignore')
@@ -89,7 +90,7 @@ class ServoReader:
         return (pwm_val - pwm_min) / pwm_span * angle_range
 
     def _init_servos(self):
-        self.send_command('#000PVER!')
+        self.send_command('#000PVER!', clear_input=True)
         for index, servo_id in enumerate(self.servo_ids):
             self.send_command("#000PCSK!")
             self.send_command(f'#{servo_id:03d}PULK!')
@@ -116,7 +117,7 @@ class ServoReader:
                 self.current_angles = new_angles
                 self.last_update_monotonic = cycle_end
                 self.last_cycle_duration = cycle_duration
-            logger.info(
+            logger.debug(
                 "Servo read completed: angles=%s | cycle_ms=%.1f",
                 new_angles,
                 cycle_duration * 1000.0,
