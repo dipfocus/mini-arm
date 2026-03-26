@@ -318,26 +318,10 @@ def _parse_args():
         help="Baudrate for the master arm serial connection",
     )
     parser.add_argument(
-        "--first-servo-id",
-        type=int,
-        default=1,
-        help="First master servo ID. Use 0 for a 0..7 chain or 1 for a 1..8 chain.",
-    )
-    parser.add_argument(
         "--response-timeout",
         type=float,
         default=0.01,
         help="Per-read serial timeout for the master arm in seconds.",
-    )
-    parser.add_argument(
-        "--read-mode",
-        default=ServoReader.READ_MODE_AUTO,
-        choices=[
-            ServoReader.READ_MODE_AUTO,
-            ServoReader.READ_MODE_SINGLE,
-            ServoReader.READ_MODE_BATCH,
-        ],
-        help="Servo polling mode. 'auto' tries batch read first and falls back to single.",
     )
     return parser.parse_args()
 
@@ -352,9 +336,8 @@ if __name__ == "__main__":
             port=args.port,
             baudrate=args.baudrate,
             servo_count=NeroTeleop.MASTER_SERVO_COUNT,
-            first_servo_id=args.first_servo_id,
+            first_servo_id=1,
             response_timeout=args.response_timeout,
-            read_mode=args.read_mode,
         )
 
         # Create slave arm controller (with velocity limiting)

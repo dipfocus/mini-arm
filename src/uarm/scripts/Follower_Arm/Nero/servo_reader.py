@@ -20,11 +20,6 @@ logger = logging.getLogger(__name__)
 
 class ServoReader:
     RESPONSE_TERMINATOR = b"!"
-    READ_MODE_SINGLE = "single"
-    READ_MODE_BATCH = "batch"
-    READ_MODE_AUTO = "auto"
-    PWM_PATTERN = re.compile(r'P(\d{4})')
-    SERVO_PWM_PATTERN = re.compile(r'#(\d{3})P(\d{4})!')
 
     def __init__(
         self,
@@ -33,33 +28,21 @@ class ServoReader:
         servo_count=8,
         first_servo_id=1,
         response_timeout=0.01,
-        read_mode=READ_MODE_AUTO,
     ):
         self.SERIAL_PORT = port
         self.BAUDRATE = baudrate
         self.servo_count = int(servo_count)
         self.first_servo_id = int(first_servo_id)
         self.response_timeout = float(response_timeout)
-        self.read_mode = str(read_mode).strip().lower()
         if self.servo_count <= 0:
             raise ValueError(f"servo_count must be greater than 0, got {self.servo_count}")
-        if self.first_servo_id < 0:
+        if self.first_servo_id <= 0:
             raise ValueError(
-                f"first_servo_id must be greater than or equal to 0, got {self.first_servo_id}"
+                f"first_servo_id must be greater than 0, got {self.first_servo_id}"
             )
         if self.response_timeout <= 0.0:
             raise ValueError(
                 f"response_timeout must be greater than 0, got {self.response_timeout}"
-            )
-        if self.read_mode not in {
-            self.READ_MODE_SINGLE,
-            self.READ_MODE_BATCH,
-            self.READ_MODE_AUTO,
-        }:
-            raise ValueError(
-                "read_mode must be one of "
-                f"{self.READ_MODE_SINGLE!r}, {self.READ_MODE_BATCH!r}, {self.READ_MODE_AUTO!r}, "
-                f"got {read_mode!r}"
             )
         self.ser = serial.Serial(
             self.SERIAL_PORT,
@@ -69,11 +52,6 @@ class ServoReader:
         )
         self.servo_ids = tuple(
             range(self.first_servo_id, self.first_servo_id + self.servo_count)
-        )
-        self._active_read_mode = (
-            self.READ_MODE_SINGLE
-            if self.read_mode == self.READ_MODE_SINGLE
-            else self.READ_MODE_BATCH
         )
         logger.info("Serial port %s opened", self.SERIAL_PORT)
 
@@ -90,127 +68,25 @@ class ServoReader:
         if self.ser.in_waiting:
             self.ser.read(self.ser.in_waiting)
 
-    def _read_response(self, expected_responses=1):
-        if expected_responses <= 0:
-            return b""
-
-        response = bytearray()
-        total_deadline = time.monotonic() + self.response_timeout * max(
-            1,
-            expected_responses + 1,
-        )
-        idle_deadline = None
-        terminator_count = 0
-
-        while time.monotonic() < total_deadline:
-            chunk = self.ser.read(self.ser.in_waiting or 1)
-            if not chunk:
-                if idle_deadline is not None and time.monotonic() >= idle_deadline:
-                    break
-                continue
-
-            response.extend(chunk)
-            terminator_count += chunk.count(self.RESPONSE_TERMINATOR)
-            idle_deadline = time.monotonic() + self.response_timeout
-            if terminator_count >= expected_responses and not self.ser.in_waiting:
-                break
-
+    def _read_response(self):
+        response = self.ser.read_until(self.RESPONSE_TERMINATOR)
         if self.ser.in_waiting:
-            response.extend(self.ser.read(self.ser.in_waiting))
-        return bytes(response)
+            response += self.ser.read(self.ser.in_waiting)
+        return response
 
-    def send_command(self, cmd, expected_responses=1):
+    def send_command(self, cmd):
         self._clear_input_buffer()
         self.ser.write(cmd.encode('ascii'))
         self.ser.flush()
-        return self._read_response(expected_responses=expected_responses).decode(
-            'ascii',
-            errors='ignore',
-        )
-
-    @staticmethod
-    def _pwm_value_to_angle(pwm_val, pwm_min=500, pwm_max=2500, angle_range=270):
-        pwm_span = pwm_max - pwm_min
-        return (pwm_val - pwm_min) / pwm_span * angle_range
+        return self._read_response().decode('ascii', errors='ignore')
 
     def pwm_to_angle(self, response_str, pwm_min=500, pwm_max=2500, angle_range=270):
-        match = self.PWM_PATTERN.search(response_str)
+        match = re.search(r'P(\d{4})', response_str)
         if not match:
             return None
-        return self._pwm_value_to_angle(
-            int(match.group(1)),
-            pwm_min=pwm_min,
-            pwm_max=pwm_max,
-            angle_range=angle_range,
-        )
-
-    def extract_pwm_values(self, response_str):
-        return [int(value) for value in self.PWM_PATTERN.findall(response_str)]
-
-    def extract_servo_pwm_values(self, response_str):
-        return {
-            int(servo_id): int(pwm_value)
-            for servo_id, pwm_value in self.SERVO_PWM_PATTERN.findall(response_str)
-        }
-
-    def extract_servo_pwm_value(self, response_str, servo_id):
-        servo_pwm_values = self.extract_servo_pwm_values(response_str)
-        if servo_id in servo_pwm_values:
-            return servo_pwm_values[servo_id]
-
-        pwm_values = self.extract_pwm_values(response_str)
-        if len(pwm_values) == 1:
-            return pwm_values[0]
-        return None
-
-    def _read_angles_single(self):
-        new_angles = [0.0] * self.servo_count
-        for index, servo_id in enumerate(self.servo_ids):
-            response = self.send_command(f'#{servo_id:03d}PRAD!')
-            pwm_value = self.extract_servo_pwm_value(response.strip(), servo_id)
-            if pwm_value is not None:
-                new_angles[index] = (
-                    self._pwm_value_to_angle(pwm_value) - self.zero_angles[index]
-                )
-        return new_angles
-
-    def _read_angles_batch(self):
-        batched_command = "".join(f'#{servo_id:03d}PRAD!' for servo_id in self.servo_ids)
-        response = self.send_command(
-            batched_command,
-            expected_responses=self.servo_count,
-        )
-        servo_pwm_values = self.extract_servo_pwm_values(response)
-        missing_servo_ids = [
-            servo_id for servo_id in self.servo_ids if servo_id not in servo_pwm_values
-        ]
-        if missing_servo_ids:
-            logger.warning(
-                "Batch servo read missing %d/%d servo responses for IDs %s: %r",
-                len(missing_servo_ids),
-                self.servo_count,
-                missing_servo_ids,
-                response.strip(),
-            )
-            return None
-
-        return [
-            self._pwm_value_to_angle(servo_pwm_values[servo_id]) - self.zero_angles[index]
-            for index, servo_id in enumerate(self.servo_ids)
-        ]
-
-    def _read_angles(self):
-        if self._active_read_mode == self.READ_MODE_BATCH:
-            angles = self._read_angles_batch()
-            if angles is not None:
-                return angles
-            logger.warning(
-                "Batch servo read failed in %s mode, falling back to single-servo polling",
-                self.read_mode,
-            )
-            self._active_read_mode = self.READ_MODE_SINGLE
-
-        return self._read_angles_single()
+        pwm_val = int(match.group(1))
+        pwm_span = pwm_max - pwm_min
+        return (pwm_val - pwm_min) / pwm_span * angle_range
 
     def _init_servos(self):
         self.send_command('#000PVER!')
@@ -218,9 +94,8 @@ class ServoReader:
             self.send_command("#000PCSK!")
             self.send_command(f'#{servo_id:03d}PULK!')
             response = self.send_command(f'#{servo_id:03d}PRAD!')
-            pwm_value = self.extract_servo_pwm_value(response.strip(), servo_id)
-            if pwm_value is not None:
-                self.zero_angles[index] = self._pwm_value_to_angle(pwm_value)
+            angle = self.pwm_to_angle(response.strip())
+            self.zero_angles[index] = angle if angle is not None else 0.0
         logger.info("Servo initial angle calibration completed")
 
     def read_loop(self, hz=100):
@@ -229,7 +104,12 @@ class ServoReader:
         dt = 1.0 / hz
         while not self._stop_event.is_set():
             cycle_start = time.monotonic()
-            new_angles = self._read_angles()
+            new_angles = [0.0] * self.servo_count
+            for index, servo_id in enumerate(self.servo_ids):
+                response = self.send_command(f'#{servo_id:03d}PRAD!')
+                angle = self.pwm_to_angle(response.strip())
+                if angle is not None:
+                    new_angles[index] = angle - self.zero_angles[index]
             cycle_end = time.monotonic()
             cycle_duration = cycle_end - cycle_start
             with self.lock:
@@ -237,8 +117,7 @@ class ServoReader:
                 self.last_update_monotonic = cycle_end
                 self.last_cycle_duration = cycle_duration
             logger.info(
-                "Servo read completed: mode=%s | angles=%s | cycle_ms=%.1f",
-                self._active_read_mode,
+                "Servo read completed: angles=%s | cycle_ms=%.1f",
                 new_angles,
                 cycle_duration * 1000.0,
             )
@@ -280,13 +159,7 @@ def main():
         "--servo-count",
         default=8,
         type=int,
-        help="Number of servos to read starting from first-servo-id.",
-    )
-    parser.add_argument(
-        "--first-servo-id",
-        default=1,
-        type=int,
-        help="First servo ID in the chain.",
+        help="Number of servos to read starting from servo ID 1.",
     )
     parser.add_argument(
         "--read-hz",
@@ -306,16 +179,6 @@ def main():
         type=float,
         help="Serial response timeout in seconds.",
     )
-    parser.add_argument(
-        "--read-mode",
-        default=ServoReader.READ_MODE_AUTO,
-        choices=[
-            ServoReader.READ_MODE_AUTO,
-            ServoReader.READ_MODE_SINGLE,
-            ServoReader.READ_MODE_BATCH,
-        ],
-        help="Servo polling mode. 'auto' tries batch read first and falls back to single.",
-    )
     args = parser.parse_args()
 
     if args.read_hz <= 0:
@@ -334,9 +197,8 @@ def main():
             port=args.port,
             baudrate=args.baudrate,
             servo_count=args.servo_count,
-            first_servo_id=args.first_servo_id,
+            first_servo_id=1,
             response_timeout=args.response_timeout,
-            read_mode=args.read_mode,
         )
         reader_thread = threading.Thread(
             target=reader.read_loop,
