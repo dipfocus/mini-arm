@@ -19,31 +19,63 @@ logger = logging.getLogger(__name__)
 
 
 class ServoReader:
-    def __init__(self, port="/dev/ttyUSB0", baudrate=115200, servo_count=8, first_servo_id=1):
+    RESPONSE_TERMINATOR = b"!"
+
+    def __init__(
+        self,
+        port="/dev/ttyUSB0",
+        baudrate=115200,
+        servo_count=8,
+        first_servo_id=1,
+        response_timeout=0.01,
+    ):
         self.SERIAL_PORT = port
         self.BAUDRATE = baudrate
         self.servo_count = int(servo_count)
         self.first_servo_id = int(first_servo_id)
+        self.response_timeout = float(response_timeout)
         if self.servo_count <= 0:
             raise ValueError(f"servo_count must be greater than 0, got {self.servo_count}")
         if self.first_servo_id <= 0:
             raise ValueError(
                 f"first_servo_id must be greater than 0, got {self.first_servo_id}"
             )
-        self.ser = serial.Serial(self.SERIAL_PORT, self.BAUDRATE, timeout=0.1)
+        if self.response_timeout <= 0.0:
+            raise ValueError(
+                f"response_timeout must be greater than 0, got {self.response_timeout}"
+            )
+        self.ser = serial.Serial(
+            self.SERIAL_PORT,
+            self.BAUDRATE,
+            timeout=self.response_timeout,
+            write_timeout=self.response_timeout,
+        )
         logger.info("Serial port %s opened", self.SERIAL_PORT)
 
         self.zero_angles = [0.0] * self.servo_count
         self.current_angles = [0.0] * self.servo_count
+        self.last_update_monotonic = 0.0
+        self.last_cycle_duration = 0.0
         self.lock = threading.Lock()
         self._stop_event = threading.Event()
 
         self._init_servos()
 
+    def _clear_input_buffer(self):
+        if self.ser.in_waiting:
+            self.ser.read(self.ser.in_waiting)
+
+    def _read_response(self):
+        response = self.ser.read_until(self.RESPONSE_TERMINATOR)
+        if self.ser.in_waiting:
+            response += self.ser.read(self.ser.in_waiting)
+        return response
+
     def send_command(self, cmd):
+        self._clear_input_buffer()
         self.ser.write(cmd.encode('ascii'))
-        time.sleep(0.008)
-        return self.ser.read_all().decode('ascii', errors='ignore')
+        self.ser.flush()
+        return self._read_response().decode('ascii', errors='ignore')
 
     def pwm_to_angle(self, response_str, pwm_min=500, pwm_max=2500, angle_range=270):
         match = re.search(r'P(\d{4})', response_str)
@@ -69,20 +101,38 @@ class ServoReader:
             raise ValueError(f"hz must be greater than 0, got {hz}")
         dt = 1.0 / hz
         while not self._stop_event.is_set():
+            cycle_start = time.monotonic()
             new_angles = [0.0] * self.servo_count
             for index, servo_id in enumerate(range(self.first_servo_id, self.first_servo_id + self.servo_count)):
                 response = self.send_command(f'#{servo_id:03d}PRAD!')
                 angle = self.pwm_to_angle(response.strip())
                 if angle is not None:
                     new_angles[index] = angle - self.zero_angles[index]
+            cycle_end = time.monotonic()
             with self.lock:
                 self.current_angles = new_angles
-            logger.debug("Servo read completed: angles=%s", new_angles)
-            self._stop_event.wait(dt)
+                self.last_update_monotonic = cycle_end
+                self.last_cycle_duration = cycle_end - cycle_start
+            logger.info("Servo read completed: angles=%s", new_angles)
+            remaining = dt - (time.monotonic() - cycle_start)
+            if remaining > 0.0:
+                self._stop_event.wait(remaining)
 
     def get_angles(self):
         with self.lock:
             return list(self.current_angles)
+
+    def get_stats(self):
+        with self.lock:
+            cycle_duration = float(self.last_cycle_duration)
+            last_update = float(self.last_update_monotonic)
+        sample_hz = 0.0 if cycle_duration <= 0.0 else 1.0 / cycle_duration
+        sample_age = None if last_update <= 0.0 else time.monotonic() - last_update
+        return {
+            "sample_hz": sample_hz,
+            "sample_age": sample_age,
+            "cycle_duration": cycle_duration,
+        }
 
     def stop(self):
         self._stop_event.set()
@@ -122,12 +172,20 @@ def main():
         type=float,
         help="Console print frequency in Hz.",
     )
+    parser.add_argument(
+        "--response-timeout",
+        default=0.01,
+        type=float,
+        help="Serial response timeout in seconds.",
+    )
     args = parser.parse_args()
 
     if args.read_hz <= 0:
         parser.error("--read-hz must be greater than 0")
     if args.print_hz <= 0:
         parser.error("--print-hz must be greater than 0")
+    if args.response_timeout <= 0:
+        parser.error("--response-timeout must be greater than 0")
 
     configure_logging()
 
@@ -139,6 +197,7 @@ def main():
             baudrate=args.baudrate,
             servo_count=args.servo_count,
             first_servo_id=args.first_servo_id,
+            response_timeout=args.response_timeout,
         )
         reader_thread = threading.Thread(
             target=reader.read_loop,
@@ -150,7 +209,13 @@ def main():
         logger.info("Test started, press Ctrl+C to stop.")
         dt = 1.0 / args.print_hz
         while True:
-            logger.info("Current angles: %s", reader.get_angles())
+            stats = reader.get_stats()
+            logger.info(
+                "Current angles: %s | sample_hz=%.1f | sample_age_ms=%s",
+                reader.get_angles(),
+                stats["sample_hz"],
+                "n/a" if stats["sample_age"] is None else f"{stats['sample_age'] * 1000.0:.1f}",
+            )
             time.sleep(dt)
     except KeyboardInterrupt:
         logger.info("Test interrupted")
