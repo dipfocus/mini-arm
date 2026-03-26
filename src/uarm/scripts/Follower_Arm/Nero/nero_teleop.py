@@ -364,11 +364,16 @@ if __name__ == "__main__":
             teleop.max_joint_acc.tolist(),
             teleop.master_filter_tau,
         )
-        dt = teleop.control_dt
+        next_tick = time.monotonic()
         while True:
             master_angles = servo_reader.get_angles()
             teleop.send_cmd(master_angles)
-            time.sleep(dt)
+            next_tick += teleop.control_dt
+            remaining = next_tick - time.monotonic()
+            if remaining > 0.0:
+                time.sleep(remaining)
+            else:
+                next_tick = time.monotonic()
 
     except KeyboardInterrupt:
         logger.info("Interrupted, robot arm returning to home...")

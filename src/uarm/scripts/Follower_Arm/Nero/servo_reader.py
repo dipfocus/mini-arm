@@ -109,11 +109,16 @@ class ServoReader:
                 if angle is not None:
                     new_angles[index] = angle - self.zero_angles[index]
             cycle_end = time.monotonic()
+            cycle_duration = cycle_end - cycle_start
             with self.lock:
                 self.current_angles = new_angles
                 self.last_update_monotonic = cycle_end
-                self.last_cycle_duration = cycle_end - cycle_start
-            logger.info("Servo read completed: angles=%s", new_angles)
+                self.last_cycle_duration = cycle_duration
+            logger.info(
+                "Servo read completed: angles=%s | cycle_ms=%.1f",
+                new_angles,
+                cycle_duration * 1000.0,
+            )
             remaining = dt - (time.monotonic() - cycle_start)
             if remaining > 0.0:
                 self._stop_event.wait(remaining)
