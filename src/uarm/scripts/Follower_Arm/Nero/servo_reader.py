@@ -23,6 +23,8 @@ class ServoReader:
     READ_MODE_SINGLE = "single"
     READ_MODE_BATCH = "batch"
     READ_MODE_AUTO = "auto"
+    PWM_PATTERN = re.compile(r'P(\d{4})')
+    SERVO_PWM_PATTERN = re.compile(r'#(\d{3})P(\d{4})!')
 
     def __init__(
         self,
@@ -41,9 +43,9 @@ class ServoReader:
         self.read_mode = str(read_mode).strip().lower()
         if self.servo_count <= 0:
             raise ValueError(f"servo_count must be greater than 0, got {self.servo_count}")
-        if self.first_servo_id <= 0:
+        if self.first_servo_id < 0:
             raise ValueError(
-                f"first_servo_id must be greater than 0, got {self.first_servo_id}"
+                f"first_servo_id must be greater than or equal to 0, got {self.first_servo_id}"
             )
         if self.response_timeout <= 0.0:
             raise ValueError(
@@ -93,13 +95,26 @@ class ServoReader:
             return b""
 
         response = bytearray()
-        for _ in range(expected_responses):
-            chunk = self.ser.read_until(self.RESPONSE_TERMINATOR)
+        total_deadline = time.monotonic() + self.response_timeout * max(
+            1,
+            expected_responses + 1,
+        )
+        idle_deadline = None
+        terminator_count = 0
+
+        while time.monotonic() < total_deadline:
+            chunk = self.ser.read(self.ser.in_waiting or 1)
             if not chunk:
-                break
+                if idle_deadline is not None and time.monotonic() >= idle_deadline:
+                    break
+                continue
+
             response.extend(chunk)
-            if not chunk.endswith(self.RESPONSE_TERMINATOR):
+            terminator_count += chunk.count(self.RESPONSE_TERMINATOR)
+            idle_deadline = time.monotonic() + self.response_timeout
+            if terminator_count >= expected_responses and not self.ser.in_waiting:
                 break
+
         if self.ser.in_waiting:
             response.extend(self.ser.read(self.ser.in_waiting))
         return bytes(response)
@@ -119,7 +134,7 @@ class ServoReader:
         return (pwm_val - pwm_min) / pwm_span * angle_range
 
     def pwm_to_angle(self, response_str, pwm_min=500, pwm_max=2500, angle_range=270):
-        match = re.search(r'P(\d{4})', response_str)
+        match = self.PWM_PATTERN.search(response_str)
         if not match:
             return None
         return self._pwm_value_to_angle(
@@ -130,15 +145,33 @@ class ServoReader:
         )
 
     def extract_pwm_values(self, response_str):
-        return [int(value) for value in re.findall(r'P(\d{4})', response_str)]
+        return [int(value) for value in self.PWM_PATTERN.findall(response_str)]
+
+    def extract_servo_pwm_values(self, response_str):
+        return {
+            int(servo_id): int(pwm_value)
+            for servo_id, pwm_value in self.SERVO_PWM_PATTERN.findall(response_str)
+        }
+
+    def extract_servo_pwm_value(self, response_str, servo_id):
+        servo_pwm_values = self.extract_servo_pwm_values(response_str)
+        if servo_id in servo_pwm_values:
+            return servo_pwm_values[servo_id]
+
+        pwm_values = self.extract_pwm_values(response_str)
+        if len(pwm_values) == 1:
+            return pwm_values[0]
+        return None
 
     def _read_angles_single(self):
         new_angles = [0.0] * self.servo_count
         for index, servo_id in enumerate(self.servo_ids):
             response = self.send_command(f'#{servo_id:03d}PRAD!')
-            angle = self.pwm_to_angle(response.strip())
-            if angle is not None:
-                new_angles[index] = angle - self.zero_angles[index]
+            pwm_value = self.extract_servo_pwm_value(response.strip(), servo_id)
+            if pwm_value is not None:
+                new_angles[index] = (
+                    self._pwm_value_to_angle(pwm_value) - self.zero_angles[index]
+                )
         return new_angles
 
     def _read_angles_batch(self):
@@ -147,19 +180,23 @@ class ServoReader:
             batched_command,
             expected_responses=self.servo_count,
         )
-        pwm_values = self.extract_pwm_values(response)
-        if len(pwm_values) != self.servo_count:
+        servo_pwm_values = self.extract_servo_pwm_values(response)
+        missing_servo_ids = [
+            servo_id for servo_id in self.servo_ids if servo_id not in servo_pwm_values
+        ]
+        if missing_servo_ids:
             logger.warning(
-                "Batch servo read expected %d PWM values, got %d: %r",
+                "Batch servo read missing %d/%d servo responses for IDs %s: %r",
+                len(missing_servo_ids),
                 self.servo_count,
-                len(pwm_values),
+                missing_servo_ids,
                 response.strip(),
             )
             return None
 
         return [
-            self._pwm_value_to_angle(pwm_val) - self.zero_angles[index]
-            for index, pwm_val in enumerate(pwm_values)
+            self._pwm_value_to_angle(servo_pwm_values[servo_id]) - self.zero_angles[index]
+            for index, servo_id in enumerate(self.servo_ids)
         ]
 
     def _read_angles(self):
@@ -181,8 +218,9 @@ class ServoReader:
             self.send_command("#000PCSK!")
             self.send_command(f'#{servo_id:03d}PULK!')
             response = self.send_command(f'#{servo_id:03d}PRAD!')
-            angle = self.pwm_to_angle(response.strip())
-            self.zero_angles[index] = angle if angle is not None else 0.0
+            pwm_value = self.extract_servo_pwm_value(response.strip(), servo_id)
+            if pwm_value is not None:
+                self.zero_angles[index] = self._pwm_value_to_angle(pwm_value)
         logger.info("Servo initial angle calibration completed")
 
     def read_loop(self, hz=100):
