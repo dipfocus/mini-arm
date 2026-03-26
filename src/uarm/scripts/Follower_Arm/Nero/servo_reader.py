@@ -20,6 +20,9 @@ logger = logging.getLogger(__name__)
 
 class ServoReader:
     RESPONSE_TERMINATOR = b"!"
+    READ_MODE_SINGLE = "single"
+    READ_MODE_BATCH = "batch"
+    READ_MODE_AUTO = "auto"
 
     def __init__(
         self,
@@ -28,12 +31,14 @@ class ServoReader:
         servo_count=8,
         first_servo_id=1,
         response_timeout=0.01,
+        read_mode=READ_MODE_AUTO,
     ):
         self.SERIAL_PORT = port
         self.BAUDRATE = baudrate
         self.servo_count = int(servo_count)
         self.first_servo_id = int(first_servo_id)
         self.response_timeout = float(response_timeout)
+        self.read_mode = str(read_mode).strip().lower()
         if self.servo_count <= 0:
             raise ValueError(f"servo_count must be greater than 0, got {self.servo_count}")
         if self.first_servo_id <= 0:
@@ -44,11 +49,29 @@ class ServoReader:
             raise ValueError(
                 f"response_timeout must be greater than 0, got {self.response_timeout}"
             )
+        if self.read_mode not in {
+            self.READ_MODE_SINGLE,
+            self.READ_MODE_BATCH,
+            self.READ_MODE_AUTO,
+        }:
+            raise ValueError(
+                "read_mode must be one of "
+                f"{self.READ_MODE_SINGLE!r}, {self.READ_MODE_BATCH!r}, {self.READ_MODE_AUTO!r}, "
+                f"got {read_mode!r}"
+            )
         self.ser = serial.Serial(
             self.SERIAL_PORT,
             self.BAUDRATE,
             timeout=self.response_timeout,
             write_timeout=self.response_timeout,
+        )
+        self.servo_ids = tuple(
+            range(self.first_servo_id, self.first_servo_id + self.servo_count)
+        )
+        self._active_read_mode = (
+            self.READ_MODE_SINGLE
+            if self.read_mode == self.READ_MODE_SINGLE
+            else self.READ_MODE_BATCH
         )
         logger.info("Serial port %s opened", self.SERIAL_PORT)
 
@@ -65,30 +88,96 @@ class ServoReader:
         if self.ser.in_waiting:
             self.ser.read(self.ser.in_waiting)
 
-    def _read_response(self):
-        response = self.ser.read_until(self.RESPONSE_TERMINATOR)
-        if self.ser.in_waiting:
-            response += self.ser.read(self.ser.in_waiting)
-        return response
+    def _read_response(self, expected_responses=1):
+        if expected_responses <= 0:
+            return b""
 
-    def send_command(self, cmd):
+        response = bytearray()
+        for _ in range(expected_responses):
+            chunk = self.ser.read_until(self.RESPONSE_TERMINATOR)
+            if not chunk:
+                break
+            response.extend(chunk)
+            if not chunk.endswith(self.RESPONSE_TERMINATOR):
+                break
+        if self.ser.in_waiting:
+            response.extend(self.ser.read(self.ser.in_waiting))
+        return bytes(response)
+
+    def send_command(self, cmd, expected_responses=1):
         self._clear_input_buffer()
         self.ser.write(cmd.encode('ascii'))
         self.ser.flush()
-        return self._read_response().decode('ascii', errors='ignore')
+        return self._read_response(expected_responses=expected_responses).decode(
+            'ascii',
+            errors='ignore',
+        )
+
+    @staticmethod
+    def _pwm_value_to_angle(pwm_val, pwm_min=500, pwm_max=2500, angle_range=270):
+        pwm_span = pwm_max - pwm_min
+        return (pwm_val - pwm_min) / pwm_span * angle_range
 
     def pwm_to_angle(self, response_str, pwm_min=500, pwm_max=2500, angle_range=270):
         match = re.search(r'P(\d{4})', response_str)
         if not match:
             return None
-        pwm_val = int(match.group(1))
-        pwm_span = pwm_max - pwm_min
-        angle = (pwm_val - pwm_min) / pwm_span * angle_range
-        return angle
+        return self._pwm_value_to_angle(
+            int(match.group(1)),
+            pwm_min=pwm_min,
+            pwm_max=pwm_max,
+            angle_range=angle_range,
+        )
+
+    def extract_pwm_values(self, response_str):
+        return [int(value) for value in re.findall(r'P(\d{4})', response_str)]
+
+    def _read_angles_single(self):
+        new_angles = [0.0] * self.servo_count
+        for index, servo_id in enumerate(self.servo_ids):
+            response = self.send_command(f'#{servo_id:03d}PRAD!')
+            angle = self.pwm_to_angle(response.strip())
+            if angle is not None:
+                new_angles[index] = angle - self.zero_angles[index]
+        return new_angles
+
+    def _read_angles_batch(self):
+        batched_command = "".join(f'#{servo_id:03d}PRAD!' for servo_id in self.servo_ids)
+        response = self.send_command(
+            batched_command,
+            expected_responses=self.servo_count,
+        )
+        pwm_values = self.extract_pwm_values(response)
+        if len(pwm_values) != self.servo_count:
+            logger.warning(
+                "Batch servo read expected %d PWM values, got %d: %r",
+                self.servo_count,
+                len(pwm_values),
+                response.strip(),
+            )
+            return None
+
+        return [
+            self._pwm_value_to_angle(pwm_val) - self.zero_angles[index]
+            for index, pwm_val in enumerate(pwm_values)
+        ]
+
+    def _read_angles(self):
+        if self._active_read_mode == self.READ_MODE_BATCH:
+            angles = self._read_angles_batch()
+            if angles is not None:
+                return angles
+            logger.warning(
+                "Batch servo read failed in %s mode, falling back to single-servo polling",
+                self.read_mode,
+            )
+            self._active_read_mode = self.READ_MODE_SINGLE
+
+        return self._read_angles_single()
 
     def _init_servos(self):
         self.send_command('#000PVER!')
-        for index, servo_id in enumerate(range(self.first_servo_id, self.first_servo_id + self.servo_count)):
+        for index, servo_id in enumerate(self.servo_ids):
             self.send_command("#000PCSK!")
             self.send_command(f'#{servo_id:03d}PULK!')
             response = self.send_command(f'#{servo_id:03d}PRAD!')
@@ -102,12 +191,7 @@ class ServoReader:
         dt = 1.0 / hz
         while not self._stop_event.is_set():
             cycle_start = time.monotonic()
-            new_angles = [0.0] * self.servo_count
-            for index, servo_id in enumerate(range(self.first_servo_id, self.first_servo_id + self.servo_count)):
-                response = self.send_command(f'#{servo_id:03d}PRAD!')
-                angle = self.pwm_to_angle(response.strip())
-                if angle is not None:
-                    new_angles[index] = angle - self.zero_angles[index]
+            new_angles = self._read_angles()
             cycle_end = time.monotonic()
             cycle_duration = cycle_end - cycle_start
             with self.lock:
@@ -115,7 +199,8 @@ class ServoReader:
                 self.last_update_monotonic = cycle_end
                 self.last_cycle_duration = cycle_duration
             logger.info(
-                "Servo read completed: angles=%s | cycle_ms=%.1f",
+                "Servo read completed: mode=%s | angles=%s | cycle_ms=%.1f",
+                self._active_read_mode,
                 new_angles,
                 cycle_duration * 1000.0,
             )
@@ -183,6 +268,16 @@ def main():
         type=float,
         help="Serial response timeout in seconds.",
     )
+    parser.add_argument(
+        "--read-mode",
+        default=ServoReader.READ_MODE_AUTO,
+        choices=[
+            ServoReader.READ_MODE_AUTO,
+            ServoReader.READ_MODE_SINGLE,
+            ServoReader.READ_MODE_BATCH,
+        ],
+        help="Servo polling mode. 'auto' tries batch read first and falls back to single.",
+    )
     args = parser.parse_args()
 
     if args.read_hz <= 0:
@@ -203,6 +298,7 @@ def main():
             servo_count=args.servo_count,
             first_servo_id=args.first_servo_id,
             response_timeout=args.response_timeout,
+            read_mode=args.read_mode,
         )
         reader_thread = threading.Thread(
             target=reader.read_loop,

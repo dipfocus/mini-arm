@@ -317,6 +317,16 @@ def _parse_args():
         default=115200,
         help="Baudrate for the master arm serial connection",
     )
+    parser.add_argument(
+        "--read-mode",
+        default=ServoReader.READ_MODE_AUTO,
+        choices=[
+            ServoReader.READ_MODE_AUTO,
+            ServoReader.READ_MODE_SINGLE,
+            ServoReader.READ_MODE_BATCH,
+        ],
+        help="Servo polling mode. 'auto' tries batch read first and falls back to single.",
+    )
     return parser.parse_args()
 
 
@@ -331,6 +341,7 @@ if __name__ == "__main__":
             baudrate=args.baudrate,
             servo_count=NeroTeleop.MASTER_SERVO_COUNT,
             first_servo_id=1,
+            read_mode=args.read_mode,
         )
 
         # Create slave arm controller (with velocity limiting)
