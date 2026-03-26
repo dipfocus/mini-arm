@@ -25,12 +25,24 @@ class NeroTeleop:
     NERO_DOF = 7
     MASTER_SERVO_COUNT = 8
     GRIPPER_INDEX = NERO_DOF
+    # Default calibration for the current master arm build:
+    # joint 2 servo rotation is roughly 2x the physical joint motion.
+    DEFAULT_MASTER_JOINT_SCALES = (
+        1.0,
+        0.5,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+    )
 
     def __init__(
         self,
         channel="can0",
         control_hz=100.0,
         connect_speed_percent=5,
+        master_joint_scales=None,
     ):
         if control_hz <= 0.0:
             raise ValueError(f"control_hz must be greater than 0, got {control_hz}")
@@ -58,10 +70,14 @@ class NeroTeleop:
         self.gripper_max_width = 0.1
         self.gripper_force = 1.0
 
+        if master_joint_scales is None:
+            master_joint_scales = self.DEFAULT_MASTER_JOINT_SCALES
+        self.master_joint_scales = self._normalize_master_joint_scales(master_joint_scales)
         self.lower_joint_limits, self.upper_joint_limits = self._ordered_joint_limits()
         logger.info(
-            "Teleop zero aligned: master startup zero maps to follower joints %s",
+            "Teleop zero aligned: master startup zero maps to follower joints %s with scales %s",
             self.home_joints.tolist(),
+            self.master_joint_scales.tolist(),
         )
 
     def _validate_master_angles(self, master_angles_deg):
@@ -79,7 +95,18 @@ class NeroTeleop:
             np.float64,
             copy=False,
         )
+        relative_joints *= self.master_joint_scales
         return self.home_joints + relative_joints
+
+    def _normalize_master_joint_scales(self, master_joint_scales):
+        scales = np.asarray(master_joint_scales, dtype=np.float64)
+        if scales.shape != (self.NERO_DOF,):
+            raise ValueError(
+                f"Expected {self.NERO_DOF} master joint scales, got shape {scales.shape}"
+            )
+        if np.any(np.isclose(scales, 0.0)):
+            raise ValueError("master joint scales must be non-zero")
+        return scales
 
     def _map_gripper(self, master_angles_deg):
         self._validate_master_angles(master_angles_deg)
@@ -153,7 +180,28 @@ def _parse_args():
         default=0.01,
         help="Per-read serial timeout for the master arm in seconds.",
     )
+    parser.add_argument(
+        "--joint-scales",
+        default=",".join(str(scale) for scale in NeroTeleop.DEFAULT_MASTER_JOINT_SCALES),
+        help=(
+            "Comma-separated master-to-follower joint scale factors for joints 1-7. "
+            "Defaults to 1,0.5,1,1,1,1,1 so master joint 2 is halved."
+        ),
+    )
     return parser.parse_args()
+
+
+def _parse_joint_scales(raw_scales):
+    parts = [part.strip() for part in raw_scales.split(",")]
+    if len(parts) != NeroTeleop.NERO_DOF:
+        raise ValueError(
+            f"--joint-scales expects {NeroTeleop.NERO_DOF} comma-separated values, "
+            f"got {len(parts)} from {raw_scales!r}"
+        )
+    try:
+        return [float(part) for part in parts]
+    except ValueError as exc:
+        raise ValueError(f"Invalid --joint-scales value {raw_scales!r}") from exc
 
 
 if __name__ == "__main__":
@@ -161,6 +209,11 @@ if __name__ == "__main__":
     teleop = None
     args = _parse_args()
     try:
+        try:
+            master_joint_scales = _parse_joint_scales(args.joint_scales)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+
         # Create master arm reader
         servo_reader = ServoReader(
             port=args.port,
@@ -175,6 +228,7 @@ if __name__ == "__main__":
             channel=args.channel,
             control_hz=args.control_hz,
             connect_speed_percent=args.connect_speed_percent,
+            master_joint_scales=master_joint_scales,
         )
 
         # Start reading thread
