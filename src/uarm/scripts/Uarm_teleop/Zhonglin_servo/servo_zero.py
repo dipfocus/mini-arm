@@ -73,7 +73,10 @@ def main():
                     angle_offset = angle - zero_angles[index] + init_qpos[index]
                     angle_rad = np.radians(angle_offset)
                     arm_pos[index] = angle_rad
-            print(angle_pos)
+            formatted_angle_pos = ", ".join(
+                "None" if angle is None else f"{angle:.3f}" for angle in angle_pos
+            )
+            print(f"[{formatted_angle_pos}]")
     
 if __name__ == "__main__":
     main()
