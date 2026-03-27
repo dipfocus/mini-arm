@@ -63,8 +63,13 @@ class NeroTeleop:
         self.home_joints = np.array(current_joints, dtype=np.float64)
 
         # Master arm layout: 7 joint servos + 1 gripper servo.
-        self.gripper_min_deg = -10.0
-        self.gripper_max_deg = 30.0
+        gripper_width = self.ctrl.get_gripper_width()
+        if gripper_width is None:
+            raise RuntimeError("Failed to read gripper width after connecting to the Nero arm")
+
+        self.gripper_home_width = gripper_width
+        self.gripper_width_per_deg = 0.1 / 40.0
+        self.gripper_scale = 1.0
         self.gripper_min_width = 0.0
         self.gripper_max_width = 0.1
         self.gripper_force = 1.0
@@ -77,6 +82,12 @@ class NeroTeleop:
             "Teleop zero aligned: master startup zero maps to follower joints %s with scales %s",
             self.home_joints.tolist(),
             self.master_joint_scales.tolist(),
+        )
+        logger.info(
+            "Master gripper zero aligned: home_width=%.3f m, width_per_deg=%.4f m/deg, scale=%.1f",
+            self.gripper_home_width,
+            self.gripper_width_per_deg,
+            self.gripper_scale,
         )
 
     def _validate_master_angles(self, master_angles_deg):
@@ -110,14 +121,10 @@ class NeroTeleop:
     def _map_gripper(self, master_angles_deg):
         self._validate_master_angles(master_angles_deg)
         grip_deg = master_angles_deg[self.GRIPPER_INDEX]
-        grip_norm = (grip_deg - self.gripper_min_deg) / max(1e-6, self.gripper_max_deg - self.gripper_min_deg)
-        return float(np.clip(grip_norm, 0.0, 1.0))
-
-    def _gripper_norm_to_width(self, grip_norm):
         return float(
             np.clip(
-                self.gripper_min_width
-                + grip_norm * (self.gripper_max_width - self.gripper_min_width),
+                self.gripper_home_width
+                + grip_deg * self.gripper_width_per_deg * self.gripper_scale,
                 self.gripper_min_width,
                 self.gripper_max_width,
             )
@@ -137,10 +144,10 @@ class NeroTeleop:
     def send_cmd(self, master_angles_deg):
         desired_pos = self._deg_to_rad_mapped(master_angles_deg)
         desired_pos = np.clip(desired_pos, self.lower_joint_limits, self.upper_joint_limits)
-        desired_grip = self._map_gripper(master_angles_deg)
-        self.ctrl.move_j(desired_pos.tolist(), blocking=False)
+        desired_grip_width = self._map_gripper(master_angles_deg)
+        self.ctrl.move_js(desired_pos.tolist(), blocking=False)
         self.ctrl.move_gripper(
-            self._gripper_norm_to_width(desired_grip),
+            desired_grip_width,
             force=self.gripper_force,
         )
 
@@ -181,10 +188,11 @@ def _parse_args():
     )
     return parser.parse_args()
 
-
 if __name__ == "__main__":
     configure_logging()
     teleop = None
+    servo_reader = None
+    reader_thread = None
     args = _parse_args()
     try:
         # Create master arm reader
@@ -196,20 +204,19 @@ if __name__ == "__main__":
             response_timeout=args.response_timeout,
         )
 
+        reader_thread = threading.Thread(
+            target=servo_reader.read_loop,
+            kwargs={"hz": args.control_hz},
+            daemon=True,
+        )
+        reader_thread.start()
+
         # Create slave arm controller in direct follow mode.
         teleop = NeroTeleop(
             channel=args.channel,
             control_hz=args.control_hz,
             connect_speed_percent=args.connect_speed_percent,
         )
-
-        # Start reading thread
-        t_reader = threading.Thread(
-            target=servo_reader.read_loop,
-            kwargs={"hz": args.control_hz},
-            daemon=True,
-        )
-        t_reader.start()
 
         logger.info(
             "Teleoperation started on %s at %.1f Hz in direct follow mode, press Ctrl+C to exit.",
@@ -232,4 +239,10 @@ if __name__ == "__main__":
     finally:
         if teleop is not None:
             teleop.shutdown()
+        if servo_reader is not None:
+            servo_reader.stop()
+        if reader_thread is not None and reader_thread.is_alive():
+            reader_thread.join(timeout=1.0)
+        if servo_reader is not None:
+            servo_reader.close()
         logger.info("Exited.")

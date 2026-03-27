@@ -338,3 +338,29 @@ class ArmController:
         assert self.is_connected(), "Robot is not connected"
         assert self.end_effector is not None, "End effector is not initialized"
         self.end_effector.move_gripper(width=width, force=force)
+
+    def get_gripper_width(
+        self,
+        timeout: float = 1.0,
+        poll_interval: float = 0.05,
+    ) -> Optional[float]:
+        """
+        Read the current AGX gripper opening width in meters.
+        """
+        assert self.is_connected(), "Robot is not connected"
+        assert self.end_effector is not None, "End effector is not initialized"
+        if timeout <= 0.0:
+            raise ValueError(f"timeout must be greater than 0, got {timeout}")
+        if poll_interval <= 0.0:
+            raise ValueError(
+                f"poll_interval must be greater than 0, got {poll_interval}"
+            )
+
+        deadline = time.monotonic() + timeout
+        while True:
+            status = self.end_effector.get_gripper_status()
+            if status is not None:
+                return float(status.msg.width)
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(poll_interval)
