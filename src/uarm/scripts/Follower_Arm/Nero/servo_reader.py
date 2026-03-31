@@ -18,6 +18,10 @@ from uarm.scripts.Follower_Arm.Nero.log_utils import configure_logging
 logger = logging.getLogger(__name__)
 
 
+def format_float_list(values, precision=3):
+    return "[" + ", ".join(f"{float(value):.{precision}f}" for value in values) + "]"
+
+
 class ServoReader:
     RESPONSE_TERMINATOR = b"!"
 
@@ -117,8 +121,8 @@ class ServoReader:
                 self.last_update_monotonic = cycle_end
                 self.last_cycle_duration = cycle_duration
             logger.debug(
-                "Servo read completed: angles=%s | cycle_ms=%.1f",
-                new_angles,
+                "Servo read completed: angles=%s | cycle_ms=%.3f",
+                format_float_list(new_angles),
                 cycle_duration * 1000.0,
             )
             remaining = dt - (time.monotonic() - cycle_start)
@@ -212,10 +216,10 @@ def main():
         while True:
             stats = reader.get_stats()
             logger.info(
-                "Current angles: %s | sample_hz=%.1f | sample_age_ms=%s",
-                reader.get_angles(),
+                "Current angles: %s | sample_hz=%.3f | sample_age_ms=%s",
+                format_float_list(reader.get_angles()),
                 stats["sample_hz"],
-                "n/a" if stats["sample_age"] is None else f"{stats['sample_age'] * 1000.0:.1f}",
+                "n/a" if stats["sample_age"] is None else f"{stats['sample_age'] * 1000.0:.3f}",
             )
             time.sleep(dt)
     except KeyboardInterrupt:
