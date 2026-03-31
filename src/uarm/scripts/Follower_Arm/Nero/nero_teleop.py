@@ -31,7 +31,7 @@ class NeroTeleop:
         1.0,
         -1.0,
         1.0,
-        1.0,
+        -1.0,
         1.0,
         1.0,
         -1.0,
@@ -106,7 +106,7 @@ class NeroTeleop:
             copy=False,
         )
         relative_joints *= self.master_joint_scales
-        relative_joints[5], relative_joints[6] = -relative_joints[6], relative_joints[5]  # swap j6 and j7
+        relative_joints[5], relative_joints[6] = relative_joints[6], -relative_joints[5]  # swap j6 and j7
         return self.home_joints + relative_joints
 
     def _normalize_master_joint_scales(self, master_joint_scales):
