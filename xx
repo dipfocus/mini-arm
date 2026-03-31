@@ -1,4 +1,0 @@
-# sim
-python src/simulation/teleop_sim.py --robot panda
-
-LOG_LEVEL=DEBUG
